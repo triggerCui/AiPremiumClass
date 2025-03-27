@@ -1,0 +1,123 @@
+#assignments one
+
+import csv
+import jieba
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+
+def load_data(filename):
+    # 图书评论信息集合
+    book_comments = {}  # 书名: "评论词1 + 评论词2 + ..."
+
+    with open(filename,'r') as f:
+        reader = csv.DictReader(f,delimiter='\t')  # 识别格式文本中标题列
+        for item in reader:
+            book = item['book']
+            comment = item['body']
+            comment_words = jieba.lcut(comment)
+
+            if book == '': continue  # 跳过空书名
+
+            # 图书评论集合收集
+            book_comments[book] = book_comments.get(book, [])
+            book_comments[book].extend(comment_words)
+
+    return book_comments
+
+if __name__ == '__main__':
+    # 加载停用词列表
+    stop_words = [line.strip() for line in open("stopwords.txt", "r", encoding="utf-8")]
+
+    # 加载图书评论信息
+    book_comments = load_data("douban_comments_fixed.txt")
+    print(len(book_comments))
+
+    # 提取书名和评论文本
+    book_names = []
+    book_comms = []
+    for book, comments in book_comments.items():
+        book_names.append(book)
+        book_comms.append(comments)
+
+    # 构建TF-IDF特征矩阵
+    #vectorizer = TfidfVectorizer(stop_words=stop_words)
+    #tfidf_matrix = vectorizer.fit_transform([' '.join(comms) for comms in book_comms])
+
+    #构建bm25特征矩阵
+    bm25_matrix = bm25(book_comms)
+
+
+    # 计算图书之间的余弦相似度
+    #similarity_matrix = cosine_similarity(tfidf_matrix)
+    similarity_matrix = cosine_similarity(bm25_matrix)
+
+    # 输入要推荐的图书名称
+    book_list = list(book_comments.keys())
+    print(book_list)
+    book_name = input("请输入图书名称: ")
+    book_idx = book_names.index(book_name)  # 获取图书索引
+
+    # 获取与输入图书最相似的图书
+    recommend_book_index = np.argsort(-similarity_matrix[book_idx])[1:11]
+
+    # 输出推荐的图书
+    for idx in recommend_book_index:
+        print(f"《{book_names[idx]}》\t 相似度: {similarity_matrix[book_idx][idx]:.4f}")
+
+
+#assignments two
+
+import torch
+import torch.nn as nn
+import numpy as np
+from torch.utils.tensorboard import SummaryWriter
+from fasttext import FastText
+import os
+
+# 检查文件是否存在
+wv_file = 'test.bin'
+if not os.path.exists(wv_file):
+    raise FileNotFoundError(f"文件 {wv_file} 不存在，请检查路径。")
+
+try:
+    # 加载预训练的Fasttext词向量
+    word_vectors = FastText.load_model(wv_file)
+except Exception as e:
+    print(f"加载模型时出错: {e}")
+
+# 获取词汇表大小和词向量维度
+vocab_size = len(word_vectors.words)
+embedding_dim = word_vectors.get_dimension()
+
+# 创建一个嵌入矩阵, 每一行都是一个词的Fasttext词向量
+embedding_matrix = np.zeros((vocab_size, embedding_dim))
+for i, word in enumerate(word_vectors.words):
+    embedding_vector = word_vectors[word]
+    if embedding_vector is not None:
+        embedding_matrix[i] = embedding_vector
+
+# 在模型中使用预训练的Fasttext词向量
+embedding = nn.Embedding.from_pretrained(torch.FloatTensor(embedding_matrix))
+
+writer = SummaryWriter()
+meta = []
+words_to_process = min(100, vocab_size)
+for i in range(words_to_process):
+    meta.append(word_vectors.words[i])
+
+writer.add_embedding(embedding.weight[:words_to_process], metadata=meta)
+
+#assginments three
+import fasttext
+
+# 训练模型
+model = fasttext.train_supervised(input='cooking.stackexchange.txt')
+
+# 保存模型
+model.save_model("cooking_model.bin")
+
+# 示例预测
+text = "How to make a delicious pizza?"
+predicted_label = model.predict(text)
+print(f"预测的标签: {predicted_label}")  
