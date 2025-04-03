@@ -1,0 +1,141 @@
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from sklearn.datasets import fetch_olivetti_faces
+from sklearn.model_selection import train_test_split
+import os
+import time
+
+
+class LSTMClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=64,
+            hidden_size=128,
+            num_layers=2,
+            batch_first=True
+        )
+        self.fc = nn.Linear(128, 40)
+
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        out = self.fc(out[:, -1, :])
+        return out
+
+
+class GRUClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gru = nn.GRU(
+            input_size=64,
+            hidden_size=128,
+            num_layers=2,
+            batch_first=True
+        )
+        self.fc = nn.Linear(128, 40)
+
+    def forward(self, x):
+        out, _ = self.gru(x)
+        out = self.fc(out[:, -1, :])
+        return out
+
+
+class RNNClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.rnn = nn.RNN(
+            input_size=64,
+            hidden_size=128,
+            num_layers=2,
+            batch_first=True
+        )
+        self.fc = nn.Linear(128, 40)
+
+    def forward(self, x):
+        out, _ = self.rnn(x)
+        out = self.fc(out[:, -1, :])
+        return out
+
+
+class BiRNNClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.birnn = nn.RNN(
+            input_size=64,
+            hidden_size=128,
+            num_layers=2,
+            batch_first=True,
+            bidirectional=True
+        )
+        self.fc = nn.Linear(128 * 2, 40)
+
+    def forward(self, x):
+        out, _ = self.birnn(x)
+        out = self.fc(torch.cat((out[:, -1, :128], out[:, 0, 128:]), dim=1))
+        return out
+
+
+def train_and_evaluate(model, model_name, epochs=50, lr=0.01):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    if not os.path.exists('runs'):
+        os.makedirs('runs')
+
+    writer = SummaryWriter(f'runs/{model_name}_{int(time.time())}')
+    for epoch in range(epochs):
+        model.train()
+        for i, (images, labels) in enumerate(train_loader):
+            images, labels = images.to(device), labels.to(device)
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            print(f'{model_name} Epoch [{epoch + 1}/{epochs}], Step [{i + 1}/{len(train_loader)}], Loss: {loss.item():.4f}')
+            writer.add_scalar('training_loss', loss.item(), epoch * len(train_loader) + i)
+
+        model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for images, labels in test_loader:
+                images, labels = images.to(device), labels.to(device)
+                outputs = model(images)
+                _, predicted = torch.max(outputs.data, 1)
+                total += labels.size(0)
+                correct += (predicted == labels).sum().item()
+            accuracy = 100 * correct / total
+
+            print(f'{model_name} Epoch [{epoch + 1}/{epochs}], Test Accuracy: {accuracy:.2f}%')
+            writer.add_scalar('test_accuracy', accuracy, epoch)
+
+    writer.close()
+
+
+olivetti_faces = fetch_olivetti_faces(shuffle=True)
+X = olivetti_faces.data.reshape(-1, 64, 64).astype('float32')
+# 数据归一化
+X = X / 255.0
+y = olivetti_faces.target
+train_X, test_X, train_y, test_y = train_test_split(X, y, test_size=0.2, random_state=42)
+
+train_X = torch.tensor(train_X)
+train_y = torch.tensor(train_y).long()
+test_X = torch.tensor(test_X)
+test_y = torch.tensor(test_y).long()
+
+train_loader = DataLoader(list(zip(train_X, train_y)), batch_size=64, shuffle=True)
+test_loader = DataLoader(list(zip(test_X, test_y)), batch_size=64)
+
+models = [LSTMClassifier(), GRUClassifier(), RNNClassifier(), BiRNNClassifier()]
+model_names = ['LSTM', 'GRU', 'RNN', 'BiRNN']
+
+for model, name in zip(models, model_names):
+    train_and_evaluate(model, name)
