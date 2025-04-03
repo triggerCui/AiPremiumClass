@@ -1,0 +1,71 @@
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import SimpleRNN, Dense
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.callbacks import TensorBoard
+import time
+
+# 加载数据集
+url = 'https://www.kaggle.com/datasets/smid80/weatherww2'
+# 这里假设数据集是CSV格式，根据实际情况调整
+data = pd.read_csv('SummaryofWeather.csv')
+
+# 提取最高气温数据
+max_temperature = data['MaxTemp'].values.reshape(-1, 1)  # 需要替换为实际的最高气温列名
+
+# 数据归一化
+scaler = MinMaxScaler()
+scaled_temperature = scaler.fit_transform(max_temperature)
+
+# 准备数据
+sequence_length = 30  # 选择合适的序列长度
+X = []
+y_1day = []
+y_5day = []
+
+for i in range(len(scaled_temperature) - sequence_length - 5):
+    X.append(scaled_temperature[i:i + sequence_length])
+    y_1day.append(scaled_temperature[i + sequence_length])
+    y_5day.append(scaled_temperature[i + sequence_length:i + sequence_length + 5])
+
+X = np.array(X)
+y_1day = np.array(y_1day)
+y_5day = np.array(y_5day)
+
+# 划分训练集和测试集
+train_size = int(len(X) * 0.8)
+X_train, X_test = X[:train_size], X[train_size:]
+y_1day_train, y_1day_test = y_1day[:train_size], y_1day[train_size:]
+y_5day_train, y_5day_test = y_5day[:train_size], y_5day[train_size:]
+
+# 构建RNN模型（预测1天）
+model_1day = Sequential()
+model_1day.add(SimpleRNN(50, input_shape=(sequence_length, 1)))
+model_1day.add(Dense(1))
+model_1day.compile(optimizer='adam', loss='mse')
+
+# 构建RNN模型（预测5天）
+model_5day = Sequential()
+model_5day.add(SimpleRNN(50, input_shape=(sequence_length, 1)))
+model_5day.add(Dense(5))
+model_5day.compile(optimizer='adam', loss='mse')
+
+# TensorBoard回调
+log_dir = "logs/fit/" + time.strftime("%Y%m%d-%H%M%S")
+tensorboard_callback = TensorBoard(log_dir=log_dir, histogram_freq=1)
+
+# 训练模型（预测1天）
+history_1day = model_1day.fit(X_train, y_1day_train, epochs=50, batch_size=32, validation_data=(X_test, y_1day_test), callbacks=[tensorboard_callback])
+
+# 训练模型（预测5天）
+history_5day = model_5day.fit(X_train, y_5day_train, epochs=50, batch_size=32, validation_data=(X_test, y_5day_test), callbacks=[tensorboard_callback])
+
+# 预测
+predictions_1day = model_1day.predict(X_test)
+predictions_5day = model_5day.predict(X_test)
+
+# 反归一化
+predictions_1day = scaler.inverse_transform(predictions_1day)
+predictions_5day = scaler.inverse_transform(predictions_5day)
