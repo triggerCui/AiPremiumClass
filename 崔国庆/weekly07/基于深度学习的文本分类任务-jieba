@@ -1,0 +1,51 @@
+import csv
+import jieba
+import matplotlib.pyplot as plt
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.model_selection import train_test_split
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+ds_comments = []
+
+# 加载数据
+with open('DMSC.csv', 'r') as file:
+    reader = csv.DictReader(file)
+    for row in reader:
+        vote = int(row['Star'])
+        # 只考虑得分1 - 2（positive）和4 - 5（negative）的评论
+        if vote in [1, 2, 4, 5]:
+            label = 1 if vote in [1, 2] else 0
+            words = jieba.lcut(row['Comment'])
+            ds_comments.append((' '.join(words), label))
+
+# 分离文本和标签
+texts, labels = zip(*ds_comments)
+
+# 构建词典并将文本转换为向量
+vectorizer = CountVectorizer()
+X = vectorizer.fit_transform(texts)
+y = labels
+
+# 划分训练集和测试集
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# 定义模型
+model = MultinomialNB()
+
+# 训练模型
+model.fit(X_train, y_train)
+
+# 预测
+y_pred = model.predict(X_test)
+
+# 评估模型
+accuracy = accuracy_score(y_test, y_pred)
+precision = precision_score(y_test, y_pred)
+recall = recall_score(y_test, y_pred)
+f1 = f1_score(y_test, y_pred)
+
+print(f"Accuracy: {accuracy}")
+print(f"Precision: {precision}")
+print(f"Recall: {recall}")
+print(f"F1-score: {f1}")    
