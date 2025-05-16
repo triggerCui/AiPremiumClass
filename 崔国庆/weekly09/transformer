@@ -1,0 +1,205 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import math
+from torch.nn.utils.rnn import pad_sequence
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, emb_size, dropout, maxlen=5000):
+        super().__init__()
+        # 行缩放指数值
+        den = torch.exp(-torch.arange(0, emb_size, 2) * math.log(10000) / emb_size)
+        # 位置编码索引 (maxlen, 1)
+        pos = torch.arange(0, maxlen).reshape(maxlen, 1)
+        # 编码矩阵 (maxlen, emb_size)
+        pos_embedding = torch.zeros((maxlen, emb_size))
+        pos_embedding[:, 0::2] = torch.sin(pos * den)
+        pos_embedding[:, 1::2] = torch.cos(pos * den)
+        # 添加批次维度（1, maxlen, emb_size），无需额外维度，直接通过广播适配批次
+        self.register_buffer('pos_embedding', pos_embedding)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, token_embedding):
+        # token_embedding 形状：(batch_size, seq_len, emb_size)
+        seq_len = token_embedding.size(1)
+        # 截取对应长度的位置编码（1, seq_len, emb_size），通过广播适配批次
+        pos_emb = self.pos_embedding[:seq_len, :].unsqueeze(0)  # 增加虚拟批次维度
+        return self.dropout(token_embedding + pos_emb)  # 广播相加
+
+class Seq2SeqTransformer(nn.Module):
+    def __init__(self, d_model, nhead, num_enc_layers, num_dec_layers, 
+                 dim_forward, dropout, enc_voc_size, dec_voc_size):
+        super().__init__()
+        self.transformer = nn.Transformer(
+            d_model=d_model,
+            nhead=nhead,
+            num_encoder_layers=num_enc_layers,
+            num_decoder_layers=num_dec_layers,
+            dim_feedforward=dim_forward,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.enc_emb = nn.Embedding(enc_voc_size, d_model)
+        self.dec_emb = nn.Embedding(dec_voc_size, d_model)
+        self.predict = nn.Linear(d_model, dec_voc_size)
+        self.pos_encoding = PositionalEncoding(d_model, dropout)
+
+    def forward(self, enc_inp, dec_inp, tgt_mask, enc_pad_mask, dec_pad_mask):
+        enc_emb = self.pos_encoding(self.enc_emb(enc_inp))
+        dec_emb = self.pos_encoding(self.dec_emb(dec_inp))
+        outs = self.transformer(
+            src=enc_emb,
+            tgt=dec_emb,
+            tgt_mask=tgt_mask,
+            src_key_padding_mask=enc_pad_mask,
+            tgt_key_padding_mask=dec_pad_mask
+        )
+        return self.predict(outs)
+    
+    def encode(self, enc_inp):
+        return self.transformer.encoder(self.pos_encoding(self.enc_emb(enc_inp)))
+    
+    def decode(self, dec_inp, memory, dec_mask):
+        return self.transformer.decoder(self.pos_encoding(self.dec_emb(dec_inp)), memory, dec_mask)
+
+class TranslationDataset(Dataset):
+    def __init__(self, enc_tokens, dec_tokens, enc_vocab, dec_vocab):
+        self.enc_data = [[enc_vocab.get(token, enc_vocab['<unk>']) for token in tokens] for tokens in enc_tokens]
+        self.dec_data = [[dec_vocab.get(token, dec_vocab['<unk>']) for token in tokens] for tokens in dec_tokens]
+        
+    def __len__(self):
+        return len(self.enc_data)
+    
+    def __getitem__(self, idx):
+        return torch.tensor(self.enc_data[idx]), torch.tensor(self.dec_data[idx])
+
+def generate_square_subsequent_mask(sz, device):
+    mask = (torch.triu(torch.ones((sz, sz), device=device)) == 1).transpose(0, 1)
+    mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+    return mask
+
+def create_mask(src, tgt, pad_idx):
+    src_seq_len, tgt_seq_len = src.shape[1], tgt.shape[1]
+    device = src.device  # 获取输入数据的设备
+    
+    # 生成解码器掩码（上三角）
+    tgt_mask = generate_square_subsequent_mask(tgt_seq_len, device)
+    
+    # 生成填充掩码（忽略pad位置）
+    src_padding_mask = (src == pad_idx)
+    tgt_padding_mask = (tgt == pad_idx)
+    
+    return None, tgt_mask, src_padding_mask, tgt_padding_mask  # src_mask 非必需，设为None
+
+def train_epoch(model, train_iter, optimizer, criterion, pad_idx, device):
+    model.train()
+    total_loss = 0
+    for enc_inp, dec_inp in train_iter:
+        enc_inp = enc_inp.to(device)
+        dec_inp = dec_inp.to(device)
+        
+        # 解码器输入/目标：移除首尾的pad
+        dec_tgt = dec_inp[:, 1:].contiguous()  # 目标为解码器输入右移一位
+        dec_inp = dec_inp[:, :-1].contiguous()  # 解码器输入左移一位（含<s>）
+        
+        # 创建掩码
+        _, tgt_mask, src_pad_mask, tgt_pad_mask = create_mask(enc_inp, dec_inp, pad_idx)
+        
+        # 前向传播
+        logits = model(enc_inp, dec_inp, tgt_mask, src_pad_mask, tgt_pad_mask)
+        
+        # 计算损失（展平后与目标对比）
+        loss = criterion(logits.reshape(-1, logits.shape[-1]), dec_tgt.reshape(-1))
+        
+        # 反向传播
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+    
+    return total_loss / len(train_iter)
+
+def main():
+    corpus = "人生得意须尽欢，莫使金樽空对月"
+    chs = list(corpus)
+    enc_tokens, dec_tokens = [], []
+    
+    for i in range(1, len(chs)):
+        enc = chs[:i]
+        dec = ['<s>'] + chs[i:] + ['</s>']
+        enc_tokens.append(enc)
+        dec_tokens.append(dec)
+    
+    # 构建词典（含特殊标记）
+    enc_vocab = {'<pad>': 0, '<unk>': 1}
+    dec_vocab = {'<pad>': 0, '<unk>': 1, '<s>': 2, '</s>': 3}
+    
+    for tokens in enc_tokens:
+        for token in tokens:
+            if token not in enc_vocab:
+                enc_vocab[token] = len(enc_vocab)
+    
+    for tokens in dec_tokens:
+        for token in tokens:
+            if token not in dec_vocab:
+                dec_vocab[token] = len(dec_vocab)
+    
+    
+    # 创建数据集和数据加载器
+    dataset = TranslationDataset(enc_tokens, dec_tokens, enc_vocab, dec_vocab)
+
+    # 修改lambda参数名为data（避免与外层batch冲突）
+    collate_fn = lambda data: (
+        pad_sequence([torch.tensor(x) for x, _ in data], batch_first=True, padding_value=enc_vocab['<pad>']),
+        pad_sequence([torch.tensor(y) for _, y in data], batch_first=True, padding_value=dec_vocab['<pad>'])
+    )
+
+    train_loader = DataLoader(
+        dataset, 
+        batch_size=2, 
+        shuffle=True, 
+        collate_fn=collate_fn  # 直接传入函数，无需再用lambda包装
+    )
+
+    # 模型参数
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    d_model, nhead = 512, 8
+    num_enc_layers, num_dec_layers = 3, 3
+    dim_forward, dropout = 1024, 0.1
+    enc_voc_size, dec_voc_size = len(enc_vocab), len(dec_vocab)
+    pad_idx = dec_vocab['<pad>']
+    
+    # 初始化模型
+    model = Seq2SeqTransformer(
+        d_model, nhead, num_enc_layers, num_dec_layers,
+        dim_forward, dropout, enc_voc_size, dec_voc_size
+    ).to(device)
+    
+    # 初始化参数
+    for p in model.parameters():
+        if p.dim() > 1:
+            nn.init.xavier_uniform_(p)
+    
+    # 优化器和损失函数
+    optimizer = optim.Adam(model.parameters(), lr=1e-4, betas=(0.9, 0.98), eps=1e-9)
+    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
+    
+    # 训练循环
+    num_epochs = 100
+    for epoch in range(1, num_epochs + 1):
+        loss = train_epoch(model, train_loader, optimizer, criterion, pad_idx, device)
+        print(f"Epoch {epoch:3d} | Loss: {loss:.4f}")
+    
+    # 保存模型
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'enc_vocab': enc_vocab,
+        'dec_vocab': dec_vocab,
+    }, 'transformer_model.pth')
+    print("模型保存成功！")
+
+if __name__ == '__main__':
+    main()
